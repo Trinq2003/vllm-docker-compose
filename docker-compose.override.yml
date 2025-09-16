@@ -1,0 +1,395 @@
+# =================================================================
+# Docker Compose Override for Development
+# =================================================================
+#
+# This file contains development-specific overrides that are
+# automatically merged with the main docker-compose files.
+#
+# It provides:
+# - Development ports (different from production)
+# - Debug configurations
+# - Volume mounts for live code reloading
+# - Development environment variables
+# - Logging configurations for development
+#
+# To use: docker-compose -f docker-compose.yml -f docker-compose.override.yml up
+# =================================================================
+
+version: '3.8'
+
+# =================================================================
+# DEVELOPMENT ENVIRONMENT VARIABLES
+# =================================================================
+# These override production environment variables for development
+
+x-dev-env: &dev-env
+  DEBUG: "true"
+  DEVELOPMENT_MODE: "true"
+  LOG_LEVEL: "DEBUG"
+  LOG_FORMAT: "text"
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+# =================================================================
+# SERVICE OVERRIDES
+# =================================================================
+
+services:
+
+  # LiteLLM Development Configuration
+  litellm:
+    environment:
+      <<: *dev-env
+      DATABASE_URL: "postgresql://llmproxy:dbpassword9090@db:5432/litellm"
+      STORE_MODEL_IN_DB: "True"
+    ports:
+      - "4000:4000"  # Development port
+    volumes:
+      - ./logs/litellm:/app/logs
+      - ./config/litellm:/app/config:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:4000/health/liveliness || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # vLLM Qwen2.5-14B Development Configuration
+  vllm-qwen25-14b-instruct-1m:
+    environment:
+      <<: *dev-env
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN}
+      VLLM_ATTENTION_BACKEND: FLASHINFER
+      VLLM_USE_FLASH_ATTN: 1
+    ports:
+      - "9998:8000"  # Development port mapping
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./logs/vllm-qwen25:/app/logs
+      - ./config/vllm:/app/config:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2']  # GPU 2 for development
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # vLLM Qwen3-30B Development Configuration
+  vllm-qwen3-30b-a3b-instruct-2507:
+    environment:
+      <<: *dev-env
+      CUDA_VISIBLE_DEVICES: 0  # GPU 0 for development
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN}
+    ports:
+      - "9999:8000"  # Development port mapping
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./logs/vllm-qwen3:/app/logs
+      - ./config/vllm:/app/config:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']  # GPU 0 for development
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # Xinference Development Configuration
+  xinference:
+    environment:
+      <<: *dev-env
+      XINFERENCE_MODEL_SRC: huggingface
+      TORCH_USE_CUDA_DSA: 1
+      PYTORCH_DISABLE_CUDA_ASSERTS: 1
+    ports:
+      - "9900:9900"  # Development port
+    volumes:
+      - ~/.cache/huggingface:/root/.xinference
+      - ./logs/xinference:/app/logs
+      - ./config/xinference:/app/config:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']  # GPU 1 for development
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9900/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # =================================================================
+  # DEVELOPMENT-SPECIFIC SERVICES
+  # =================================================================
+
+  # PgAdmin for database management (development only)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin_dev
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@dev.local
+      PGADMIN_DEFAULT_PASSWORD: devpassword
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - db
+    networks:
+      - shared-vllm-network
+    profiles:
+      - dev
+
+  # Redis Commander for Redis management (development only)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: redis_commander_dev
+    environment:
+      REDIS_HOSTS: local:redis:6379:0:devpassword
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - shared-vllm-network
+    profiles:
+      - dev
+
+  # MinIO Console (already included in main compose, but ensuring dev config)
+  minio:
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console (dev port)
+    volumes:
+      - minio_data:/data
+      - ./logs/minio:/app/logs
+    environment:
+      <<: *dev-env
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # =================================================================
+  # LOGGING AND MONITORING OVERRIDES
+  # =================================================================
+
+  # Enhanced logging for development
+  prometheus:
+    volumes:
+      - prometheus_data:/prometheus
+      - ./monitoring/prometheus.dev.yml:/etc/prometheus/prometheus.yml:ro
+      - ./logs/prometheus:/app/logs
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"  # Shorter retention for dev
+      - "--web.enable-lifecycle"
+      - "--log.level=debug"
+    restart: unless-stopped
+
+  # =================================================================
+  # DATABASE OVERRIDES FOR DEVELOPMENT
+  # =================================================================
+
+  # PostgreSQL with development settings
+  db:
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: llmproxy
+      POSTGRES_PASSWORD: dbpassword9090
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init-dev.sql:/docker-entrypoint-initdb.d/init-dev.sql:ro
+    ports:
+      - "5432:5432"  # Expose for development tools
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d litellm -U llmproxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # MySQL with development settings
+  mysql:
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ragflow}
+      MYSQL_DATABASE: rag_flow
+      MYSQL_USER: ragflow_user
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-ragflow}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql/mysql-init-dev.sql:/docker-entrypoint-initdb.d/mysql-init-dev.sql:ro
+    ports:
+      - "3306:3306"  # Expose for development tools
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis with development settings
+  redis:
+    volumes:
+      - redis_data:/data
+      - ./config/redis.conf:/etc/redis/redis.conf:ro
+    ports:
+      - "6379:6379"  # Expose for development tools
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  # Elasticsearch with development settings
+  elasticsearch:
+    environment:
+      - "discovery.type=single-node"
+      - "xpack.security.enabled=false"
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"  # Smaller heap for development
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+      - ./logs/elasticsearch:/usr/share/elasticsearch/logs
+    ports:
+      - "${ES_PORT:-1200}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+# =================================================================
+# VOLUME OVERRIDES FOR DEVELOPMENT
+# =================================================================
+
+volumes:
+  # Override production volumes with development-specific ones
+  postgres_data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ./data/postgres
+
+  mysql_data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ./data/mysql
+
+  redis_data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ./data/redis
+
+  elasticsearch_data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ./data/elasticsearch
+
+  minio_data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ./data/minio
+
+  prometheus_data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ./data/prometheus
+
+  pgadmin_data:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ./data/pgadmin
+
+# =================================================================
+# NETWORK CONFIGURATION
+# =================================================================
+
+networks:
+  shared-vllm-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+    driver_opts:
+      com.docker.network.bridge.name: vllm-dev-bridge
+
+# =================================================================
+# DEVELOPMENT PROFILES
+# =================================================================
+
+# Profiles allow selective service startup
+# Use: docker-compose --profile dev up
+profiles:
+  - dev    # Development tools (pgadmin, redis-commander)
+  - debug  # Enhanced debugging services
+  - test   # Testing services
+
+# =================================================================
+# DEVELOPMENT NOTES
+# =================================================================
+#
+# Quick development commands:
+#
+# Start all services with dev overrides:
+# docker-compose -f docker-compose.yml -f docker-compose.override.yml up -d
+#
+# Start with development tools:
+# docker-compose --profile dev up -d
+#
+# View logs with development formatting:
+# docker-compose logs -f --tail=100
+#
+# Connect to databases:
+# - PostgreSQL: localhost:5432 (user: llmproxy, pass: dbpassword9090)
+# - MySQL: localhost:3306 (user: ragflow_user, pass: ragflow)
+# - Redis: localhost:6379 (pass: devpassword)
+#
+# Access development UIs:
+# - PgAdmin: http://localhost:5050 (admin@dev.local / devpassword)
+# - Redis Commander: http://localhost:8081
+# - MinIO Console: http://localhost:9001
+#
+# =================================================================
