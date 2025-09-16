@@ -89,7 +89,7 @@ A comprehensive deployment repository for running multiple Large Language Models
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd vllm
+   cd deployment
    ```
 
 2. **Configure environment**
