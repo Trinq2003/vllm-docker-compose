@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  xinference:
+    image: xprobe/xinference:v1.9.1-cu128
+    container_name: xinference
+    networks:
+      - shared-vllm-network
+    ports:
+    - "9900:9900"
+    volumes:
+    - /home/tri-dev/.cache/huggingface:/root/.xinference
+    environment:
+    - XINFERENCE_MODEL_SRC=huggingface
+    - TORCH_USE_CUDA_DSA=1
+    - PYTORCH_DISABLE_CUDA_ASSERTS=1
+    command: xinference-local --host 0.0.0.0 --port 9900
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+              driver: nvidia
+              device_ids: ['1']
+
+networks:
+  shared-vllm-network:
+    external: true
